@@ -180,4 +180,10 @@ gboolean mm_ublox_parse_uiproute_response_for_ipaddr (const gchar  *reply,
                                                       gchar       **out_iface,
                                                       GError      **error);
 
+/*****************************************************************************/
+/* APN destinations configuration */
+
+GList *mm_ublox_get_apn_destinations (const gchar  *apn,
+                                      GError      **error);
+
 #endif  /* MM_MODEM_HELPERS_UBLOX_H */

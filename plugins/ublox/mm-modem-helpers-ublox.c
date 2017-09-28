@@ -1557,3 +1557,54 @@ mm_ublox_parse_uiproute_response_for_ipaddr (const gchar  *reply,
         g_free (iface);
     return TRUE;
 }
+
+/*****************************************************************************/
+/* Query custom destination routes per apn */
+
+#if !defined MM_UBLOX_APN_DESTINATIONS_DIR
+# define MM_UBLOX_APN_DESTINATIONS_DIR "/etc/ModemManager/"
+#endif
+
+#if !defined MM_UBLOX_APN_DESTINATIONS_EXT
+# define MM_UBLOX_APN_DESTINATIONS_EXT ".route"
+#endif
+
+GList *
+mm_ublox_get_apn_destinations (const gchar  *apn,
+                               GError      **error)
+{
+    gchar  *filepath;
+    gchar  *contents = NULL;
+    GList  *destinations = NULL;
+    gchar **split = NULL;
+    guint   i;
+
+    filepath = g_strdup_printf ("%s%s%s", MM_UBLOX_APN_DESTINATIONS_DIR, apn, MM_UBLOX_APN_DESTINATIONS_EXT);
+
+    /* If file doesn't exist, log about it and return no destinations */
+    if (!g_file_test (filepath, G_FILE_TEST_EXISTS)) {
+        mm_dbg ("No APN destinations file for '%s'", apn);
+        goto out;
+    }
+
+    if (!g_file_get_contents (filepath, &contents, NULL, error))
+        goto out;
+
+    split = g_strsplit_set (contents, "\r\n", -1);
+    if (!split)
+        goto out;
+
+    for (i = 0; split[i]; i++) {
+        g_strstrip (split[i]);
+        if (split[i][0]) {
+            mm_dbg ("APN destination found: '%s'", split[i]);
+            destinations = g_list_append (destinations, g_strdup (split[i]));
+        }
+    }
+
+ out:
+    g_strfreev (split);
+    g_free (contents);
+    g_free (filepath);
+    return destinations;
+}

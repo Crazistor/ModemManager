@@ -70,8 +70,10 @@ typedef struct {
     gboolean                secondary;
     guint                   secondary_i;
     /* For route settings */
+    gchar                  *unquoted_apn;
     gchar                  *address;
     gchar                  *iface;
+    GList                  *apn_destinations;
     /* For IPv4 settings */
     MMBearerIpConfig       *ip_config;
 } CommonConnectContext;
@@ -79,6 +81,8 @@ typedef struct {
 static void
 common_connect_context_free (CommonConnectContext *ctx)
 {
+    g_list_free_full (ctx->apn_destinations, g_free);
+    g_free (ctx->unquoted_apn);
     g_free (ctx->iface);
     g_free (ctx->address);
     if (ctx->ip_config)
@@ -115,6 +119,11 @@ common_connect_task_new (MMBroadbandBearerUblox  *self,
     ctx->secondary_i = secondary_i;
     if (data)
         ctx->data = g_object_ref (data);
+
+    if (!secondary)
+        ctx->unquoted_apn = g_strdup (mm_bearer_properties_get_apn (mm_base_bearer_peek_config (MM_BASE_BEARER (self))));
+    else
+        ctx->unquoted_apn = g_strdup (mm_bearer_properties_get_secondary_apn (mm_base_bearer_peek_config (MM_BASE_BEARER (self)), ctx->secondary_i));
 
     task = g_task_new (self, cancellable, callback, user_data);
     g_task_set_task_data (task, ctx, (GDestroyNotify) common_connect_context_free);
@@ -335,6 +344,96 @@ dial_secondary_3gpp_finish (MMBroadbandBearer  *self,
 }
 
 static void
+complete_connected (GTask *task)
+{
+    CommonConnectContext *ctx;
+
+    ctx = (CommonConnectContext *) g_task_get_task_data (task);
+
+    if (!ctx->secondary)
+        /* primary context */
+        g_task_return_pointer (task, g_object_ref (ctx->data), g_object_unref);
+    else
+        /* secondary context */
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void uiproute_add_destination (GTask *task);
+
+static void
+uiproute_add_destination_ready (MMBaseModem  *modem,
+                                GAsyncResult *res,
+                                GTask        *task)
+{
+    const gchar          *response;
+    GError               *error = NULL;
+    CommonConnectContext *ctx;
+
+    ctx = (CommonConnectContext *) g_task_get_task_data (task);
+
+    response = mm_base_modem_at_command_finish (modem, res, &error);
+    if (!response) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    uiproute_add_destination (task);
+}
+
+static void
+uiproute_add_destination (GTask *task)
+{
+    CommonConnectContext *ctx;
+    gchar                *cmd;
+    gchar                *next_destination;
+
+    ctx = (CommonConnectContext *) g_task_get_task_data (task);
+
+    if (!ctx->apn_destinations) {
+        complete_connected (task);
+        return;
+    }
+
+    next_destination = ctx->apn_destinations->data;
+    ctx->apn_destinations = g_list_delete_link (ctx->apn_destinations, ctx->apn_destinations);
+
+    /* Add destination route */
+    mm_dbg ("Adding route for destination %s through %s...", next_destination, ctx->iface);
+    cmd = g_strdup_printf ("+UIPROUTE=\"add -host %s gw %s netmask 0.0.0.0 dev %s\"", next_destination, ctx->address, ctx->iface);
+    mm_base_modem_at_command (MM_BASE_MODEM (ctx->modem),
+                              cmd,
+                              10,
+                              FALSE,
+                              (GAsyncReadyCallback) uiproute_add_destination_ready,
+                              task);
+    g_free (cmd);
+    g_free (next_destination);
+}
+
+static void
+uiproute_del_default_ready (MMBaseModem  *modem,
+                            GAsyncResult *res,
+                            GTask        *task)
+{
+    const gchar          *response;
+    GError               *error = NULL;
+    CommonConnectContext *ctx;
+
+    ctx = (CommonConnectContext *) g_task_get_task_data (task);
+
+    response = mm_base_modem_at_command_finish (modem, res, &error);
+    if (!response) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    uiproute_add_destination (task);
+}
+
+static void
 uiproute_ready (MMBaseModem  *modem,
                 GAsyncResult *res,
                 GTask        *task)
@@ -342,6 +441,7 @@ uiproute_ready (MMBaseModem  *modem,
     const gchar          *response;
     GError               *error = NULL;
     CommonConnectContext *ctx;
+    gchar                *cmd;
 
     ctx = (CommonConnectContext *) g_task_get_task_data (task);
 
@@ -360,13 +460,16 @@ uiproute_ready (MMBaseModem  *modem,
 
     mm_dbg ("PDP context %u is managed by internal interface '%s'", ctx->cid, ctx->iface);
 
-    if (!ctx->secondary)
-        /* primary context */
-        g_task_return_pointer (task, g_object_ref (ctx->data), g_object_unref);
-    else
-        /* secondary context */
-        g_task_return_boolean (task, TRUE);
-    g_object_unref (task);
+    /* Remove default route */
+    mm_dbg ("Removing default route through %s...", ctx->iface);
+    cmd = g_strdup_printf ("+UIPROUTE=\"del -net default gw %s netmask 0.0.0.0 dev %s\"", ctx->address, ctx->iface);
+    mm_base_modem_at_command (MM_BASE_MODEM (ctx->modem),
+                              cmd,
+                              10,
+                              FALSE,
+                              (GAsyncReadyCallback) uiproute_del_default_ready,
+                              task);
+    g_free (cmd);
 }
 
 static void
@@ -443,6 +546,20 @@ cgact_activate_ready (MMBaseModem  *modem,
         return;
     }
 
+    ctx->apn_destinations = mm_ublox_get_apn_destinations (ctx->unquoted_apn, &error);
+    if (error) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    /* If there are no custom APN destinations, then we're just fine with the
+     * default route generated */
+    if (!ctx->apn_destinations) {
+        complete_connected (task);
+        return;
+    }
+
     mm_dbg ("querying PDP context %u IP address...", ctx->cid);
     cmd = g_strdup_printf ("+CGPADDR=%u", ctx->cid);
     mm_base_modem_at_command (MM_BASE_MODEM (ctx->modem),
@@ -509,7 +626,6 @@ uauthreq_ready (MMBaseModem  *modem,
     GError                 *error = NULL;
     gchar                  *cmd;
     const gchar            *pdp_type;
-    const gchar            *unquoted_apn;
     gchar                  *apn;
     MMBearerIpFamily        ip_family;
     CommonConnectContext   *ctx;
@@ -546,12 +662,7 @@ uauthreq_ready (MMBaseModem  *modem,
         return;
     }
 
-    if (!ctx->secondary)
-        unquoted_apn = mm_bearer_properties_get_apn (mm_base_bearer_peek_config (MM_BASE_BEARER (self)));
-    else
-        unquoted_apn = mm_bearer_properties_get_secondary_apn (mm_base_bearer_peek_config (MM_BASE_BEARER (self)), ctx->secondary_i);
-    apn = mm_port_serial_at_quote_string (unquoted_apn);
-
+    apn = mm_port_serial_at_quote_string (ctx->unquoted_apn);
     cmd = g_strdup_printf ("+CGDCONT=%u,\"%s\",%s",
                            ctx->cid, pdp_type, apn);
     g_free (apn);
