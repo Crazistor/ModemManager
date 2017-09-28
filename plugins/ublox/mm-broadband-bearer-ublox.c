@@ -330,6 +330,62 @@ dial_secondary_3gpp_finish (MMBroadbandBearer  *self,
 }
 
 static void
+cgpaddr_ready (MMBaseModem  *modem,
+               GAsyncResult *res,
+               GTask        *task)
+{
+    const gchar          *response;
+    GError               *error = NULL;
+    CommonConnectContext *ctx;
+    GList                *pdp_addresses;
+    GList                *l;
+    gboolean              found = FALSE;
+
+    ctx = (CommonConnectContext *) g_task_get_task_data (task);
+
+    response = mm_base_modem_at_command_finish (modem, res, &error);
+    if (!response) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    pdp_addresses = mm_3gpp_parse_cgpaddr_exec_response (response, &error);
+    if (!pdp_addresses) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    for (l = pdp_addresses; !found && l; l = g_list_next (l)) {
+        const MM3gppPdpContextAddress *item;
+
+        item = l->data;
+        if (ctx->cid == item->cid) {
+            found = TRUE;
+            mm_dbg ("IP address for PDP context %u found: %s", ctx->cid, item->address);
+        }
+    }
+
+    mm_3gpp_pdp_context_address_list_free (pdp_addresses);
+
+    if (!found) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "No IP address specified for PDP context %u", ctx->cid);
+        g_object_unref (task);
+        return;
+    }
+
+    if (!ctx->secondary)
+        /* primary context */
+        g_task_return_pointer (task, g_object_ref (ctx->data), g_object_unref);
+    else
+        /* secondary context */
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
 cgact_activate_ready (MMBaseModem  *modem,
                       GAsyncResult *res,
                       GTask        *task)
@@ -337,19 +393,26 @@ cgact_activate_ready (MMBaseModem  *modem,
     const gchar          *response;
     GError               *error = NULL;
     CommonConnectContext *ctx;
+    gchar                *cmd;
 
     ctx = (CommonConnectContext *) g_task_get_task_data (task);
 
     response = mm_base_modem_at_command_finish (modem, res, &error);
-    if (!response)
+    if (!response) {
         g_task_return_error (task, error);
-    else if (!ctx->secondary)
-        /* primary context */
-        g_task_return_pointer (task, g_object_ref (ctx->data), g_object_unref);
-    else
-        /* secondary context */
-        g_task_return_boolean (task, TRUE);
-    g_object_unref (task);
+        g_object_unref (task);
+        return;
+    }
+
+    mm_dbg ("querying PDP context %u IP address...", ctx->cid);
+    cmd = g_strdup_printf ("+CGPADDR=%u", ctx->cid);
+    mm_base_modem_at_command (MM_BASE_MODEM (ctx->modem),
+                              cmd,
+                              10,
+                              FALSE,
+                              (GAsyncReadyCallback) cgpaddr_ready,
+                              task);
+    g_free (cmd);
 }
 
 static void
