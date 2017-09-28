@@ -152,6 +152,47 @@ mm_base_bearer_export (MMBaseBearer *self)
 /*****************************************************************************/
 
 static void
+base_bearer_set_apn_connected (MMBaseBearer *self,
+                               const gchar  *apn,
+                               gboolean      connected)
+{
+    const gchar * const  *previous_list;
+    GPtrArray            *new_list;
+    guint                 i, n;
+    gboolean              remove = !connected;
+    gboolean              add    = connected;
+
+    previous_list = mm_gdbus_bearer_get_connected_apns (MM_GDBUS_BEARER (self));
+    n = (previous_list ? g_strv_length ((gchar **) previous_list) : 0);
+
+    new_list = g_ptr_array_new_full (n + 2, g_free);
+
+    for (i = 0; i < n; i++) {
+        gboolean equal;
+
+        equal = g_str_equal (previous_list[i], apn);
+
+        if (remove && equal)
+            continue;
+
+        if (add && equal)
+            add = FALSE;
+
+        g_ptr_array_add (new_list, g_strdup (previous_list[i]));
+    }
+
+    if (add)
+        g_ptr_array_add (new_list, g_strdup (apn));
+
+    g_ptr_array_add (new_list, NULL);
+
+    mm_gdbus_bearer_set_connected_apns (MM_GDBUS_BEARER (self), (const gchar *const *)new_list->pdata);
+    g_ptr_array_unref (new_list);
+}
+
+/*****************************************************************************/
+
+static void
 connection_monitor_stop (MMBaseBearer *self)
 {
     if (self->priv->connection_monitor_id) {
@@ -375,6 +416,7 @@ bearer_update_status (MMBaseBearer *self,
     /* Ensure that we don't expose any connection related data in the
      * interface when going into disconnected state. */
     if (self->priv->status == MM_BEARER_STATUS_DISCONNECTED) {
+        base_bearer_set_apn_connected (self, mm_bearer_properties_get_apn (mm_base_bearer_peek_config (self)), FALSE);
         bearer_reset_interface_status (self);
         /* Stop statistics */
         bearer_stats_stop (self);
@@ -389,6 +431,8 @@ bearer_update_status_connected (MMBaseBearer *self,
                                 MMBearerIpConfig *ipv4_config,
                                 MMBearerIpConfig *ipv6_config)
 {
+    base_bearer_set_apn_connected (self, mm_bearer_properties_get_apn (mm_base_bearer_peek_config (self)), TRUE);
+
     mm_gdbus_bearer_set_connected (MM_GDBUS_BEARER (self), TRUE);
     mm_gdbus_bearer_set_suspended (MM_GDBUS_BEARER (self), FALSE);
     mm_gdbus_bearer_set_interface (MM_GDBUS_BEARER (self), interface);
@@ -723,6 +767,8 @@ disconnect_secondary_ready (MMBaseBearer               *self,
     } else
         mm_dbg ("Secondary connection context (#%u) disconnected", ctx->idx);
 
+    base_bearer_set_apn_connected (self, mm_bearer_properties_get_secondary_apn (mm_base_bearer_peek_config (self), ctx->idx), FALSE);
+
     /* Reconnect */
     ctx->step = SECONDARY_CONNECTION_CONTEXT_STEP_CONNECT;
     secondary_connection_context_step (ctx);
@@ -745,6 +791,7 @@ load_connection_status_secondary_ready (MMBaseBearer               *self,
 
     case MM_BEARER_CONNECTION_STATUS_DISCONNECTED:
         /* Need to reconnect? */
+        base_bearer_set_apn_connected (self, mm_bearer_properties_get_secondary_apn (mm_base_bearer_peek_config (self), ctx->idx), FALSE);
         mm_dbg ("secondary connection context (#%u) is disconnected", ctx->idx);
         g_assert (!error);
         ctx->step = SECONDARY_CONNECTION_CONTEXT_STEP_CONNECT;
@@ -815,6 +862,7 @@ connect_secondary_ready (MMBaseBearer               *self,
         ctx->step = SECONDARY_CONNECTION_CONTEXT_STEP_DISCONNECT;
     }
     else {
+        base_bearer_set_apn_connected (self, mm_bearer_properties_get_secondary_apn (mm_base_bearer_peek_config (self), ctx->idx), TRUE);
         mm_dbg ("Connected secondary connection context (#%u)", ctx->idx);
         ctx->step++;
     }
@@ -1645,6 +1693,8 @@ report_connection_status (MMBaseBearer *self,
      * interface status */
     if (status == MM_BEARER_CONNECTION_STATUS_DISCONNECTED)
         bearer_update_status (self, MM_BEARER_STATUS_DISCONNECTED);
+
+    base_bearer_set_apn_connected (self, mm_bearer_properties_get_apn (mm_base_bearer_peek_config (self)), status == MM_BEARER_CONNECTION_STATUS_CONNECTED);
 }
 
 void
