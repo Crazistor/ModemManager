@@ -69,6 +69,9 @@ typedef struct {
     gboolean                auth_required;
     gboolean                secondary;
     guint                   secondary_i;
+    /* For route settings */
+    gchar                  *address;
+    gchar                  *iface;
     /* For IPv4 settings */
     MMBearerIpConfig       *ip_config;
 } CommonConnectContext;
@@ -76,6 +79,8 @@ typedef struct {
 static void
 common_connect_context_free (CommonConnectContext *ctx)
 {
+    g_free (ctx->iface);
+    g_free (ctx->address);
     if (ctx->ip_config)
         g_object_unref (ctx->ip_config);
     if (ctx->data)
@@ -330,6 +335,41 @@ dial_secondary_3gpp_finish (MMBroadbandBearer  *self,
 }
 
 static void
+uiproute_ready (MMBaseModem  *modem,
+                GAsyncResult *res,
+                GTask        *task)
+{
+    const gchar          *response;
+    GError               *error = NULL;
+    CommonConnectContext *ctx;
+
+    ctx = (CommonConnectContext *) g_task_get_task_data (task);
+
+    response = mm_base_modem_at_command_finish (modem, res, &error);
+    if (!response) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    if (!mm_ublox_parse_uiproute_response_for_ipaddr (response, ctx->address, &ctx->iface, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    mm_dbg ("PDP context %u is managed by internal interface '%s'", ctx->cid, ctx->iface);
+
+    if (!ctx->secondary)
+        /* primary context */
+        g_task_return_pointer (task, g_object_ref (ctx->data), g_object_unref);
+    else
+        /* secondary context */
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
 cgpaddr_ready (MMBaseModem  *modem,
                GAsyncResult *res,
                GTask        *task)
@@ -339,7 +379,6 @@ cgpaddr_ready (MMBaseModem  *modem,
     CommonConnectContext *ctx;
     GList                *pdp_addresses;
     GList                *l;
-    gboolean              found = FALSE;
 
     ctx = (CommonConnectContext *) g_task_get_task_data (task);
 
@@ -357,32 +396,32 @@ cgpaddr_ready (MMBaseModem  *modem,
         return;
     }
 
-    for (l = pdp_addresses; !found && l; l = g_list_next (l)) {
+    for (l = pdp_addresses; !ctx->address && l; l = g_list_next (l)) {
         const MM3gppPdpContextAddress *item;
 
         item = l->data;
         if (ctx->cid == item->cid) {
-            found = TRUE;
             mm_dbg ("IP address for PDP context %u found: %s", ctx->cid, item->address);
+            ctx->address = g_strdup (item->address);
         }
     }
 
     mm_3gpp_pdp_context_address_list_free (pdp_addresses);
 
-    if (!found) {
+    if (!ctx->address) {
         g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
                                  "No IP address specified for PDP context %u", ctx->cid);
         g_object_unref (task);
         return;
     }
 
-    if (!ctx->secondary)
-        /* primary context */
-        g_task_return_pointer (task, g_object_ref (ctx->data), g_object_unref);
-    else
-        /* secondary context */
-        g_task_return_boolean (task, TRUE);
-    g_object_unref (task);
+    mm_dbg ("querying current routes...");
+    mm_base_modem_at_command (MM_BASE_MODEM (ctx->modem),
+                              "+UIPROUTE?",
+                              10,
+                              FALSE,
+                              (GAsyncReadyCallback) uiproute_ready,
+                              task);
 }
 
 static void
