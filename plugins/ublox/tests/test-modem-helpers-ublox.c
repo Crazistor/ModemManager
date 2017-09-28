@@ -1072,6 +1072,36 @@ test_ugcntrd_response (void)
 }
 
 /*****************************************************************************/
+/* Test +UIPROUTE? response */
+
+static void
+test_uiproute_response (void)
+{
+    static const gchar *response =
+        "+UIPROUTE: Kernel IP routing table\r\n"
+        "+UIPROUTE: Destination     Gateway         Genmask         Flags Metric Ref    Use Iface\r\n"
+        "+UIPROUTE: default         10.156.9.115    0.0.0.0         UG    0      0        0 inm1\r\n"
+        "+UIPROUTE: default         10.156.88.200   0.0.0.0         UG    0      0        0 inm0\r\n"
+        "+UIPROUTE: 192.168.2.0     *               255.255.255.0   U     0      0        0 usb0\r\n"
+        "+UIPROUTE: 192.168.90.0    *               255.255.255.0   U     0      0        0 eth0\r\n";
+    gchar *aux = NULL;
+    GError *error = NULL;
+    gboolean result;
+
+    result = mm_ublox_parse_uiproute_response_for_ipaddr (response, "10.156.9.115", &aux, &error);
+    g_assert_no_error (error);
+    g_assert (result);
+    g_assert_cmpstr (aux, ==, "inm1");
+    g_free (aux);
+
+    result = mm_ublox_parse_uiproute_response_for_ipaddr (response, "10.156.88.200", &aux, &error);
+    g_assert_no_error (error);
+    g_assert (result);
+    g_assert_cmpstr (aux, ==, "inm0");
+    g_free (aux);
+}
+
+/*****************************************************************************/
 
 void
 _mm_log (const char *loc,
@@ -1139,6 +1169,7 @@ int main (int argc, char **argv)
     g_test_add_func ("/MM/ublox/uauthreq/test/with-auto", test_uauthreq_with_auto);
     g_test_add_func ("/MM/ublox/uauthreq/test/less-fields", test_uauthreq_less_fields);
     g_test_add_func ("/MM/ublox/ugcntrd/response", test_ugcntrd_response);
+    g_test_add_func ("/MM/ublox/uiproute/response", test_uiproute_response);
 
     return g_test_run ();
 }

@@ -1468,3 +1468,92 @@ out:
         *out_total_rx_bytes = total_rx_bytes;
     return TRUE;
 }
+
+/*****************************************************************************/
+/* +UIPROUTE? response parser
+ *
+ * E.g.:
+ * +UIPROUTE: Kernel IP routing table
+ * +UIPROUTE: Destination     Gateway         Genmask         Flags Metric Ref    Use Iface
+ * +UIPROUTE: default         10.156.9.115    0.0.0.0         UG    0      0        0 inm1
+ * +UIPROUTE: default         10.156.88.200   0.0.0.0         UG    0      0        0 inm0
+ * +UIPROUTE: 192.168.2.0     *               255.255.255.0   U     0      0        0 usb0
+ * +UIPROUTE: 192.168.90.0    *               255.255.255.0   U     0      0        0 eth0
+ */
+
+gboolean
+mm_ublox_parse_uiproute_response_for_ipaddr (const gchar  *reply,
+                                             const gchar  *ipaddr,
+                                             gchar       **out_iface,
+                                             GError      **error)
+{
+    GError *inner_error = NULL;
+    GRegex *r;
+    GMatchInfo *match_info;
+    gchar *iface = NULL;
+
+    if (!reply || !reply[0])
+        goto out;
+
+    reply = mm_strip_tag (reply, "+UIPROUTE: Kernel IP routing table");
+
+    r = g_regex_new ("\\+UIPROUTE:\\s*([^ ]*)\\s*([^ ]*)\\s*([^ ]*)\\s*([^ ]*)\\s*([^ ]*)\\s*([^ ]*)\\s*([^ ]*)\\s*([^ \\r\\n]*)(?:\\r\\n)",
+                     G_REGEX_DOLLAR_ENDONLY | G_REGEX_RAW, 0, &inner_error);
+    g_assert (r);
+
+    g_regex_match_full (r, reply, strlen (reply), 0, 0, &match_info, &inner_error);
+    while (!inner_error && g_match_info_matches (match_info)) {
+        gchar *entry_address;
+        gchar *entry_iface;
+
+        if (!(entry_address = mm_get_string_unquoted_from_match_info (match_info, 2))) {
+            inner_error = g_error_new (MM_CORE_ERROR,
+                                       MM_CORE_ERROR_FAILED,
+                                       "Couldn't parse address from reply: '%s'",
+                                       reply);
+            break;
+        }
+
+        if (!(entry_iface = mm_get_string_unquoted_from_match_info (match_info, 8))) {
+            inner_error = g_error_new (MM_CORE_ERROR,
+                                       MM_CORE_ERROR_FAILED,
+                                       "Couldn't parse iface from reply: '%s'",
+                                       reply);
+            break;
+        }
+
+        if (g_str_equal (entry_address, ipaddr)) {
+            iface = entry_iface;
+            g_free (entry_address);
+            break;
+        }
+
+        g_free (entry_iface);
+        g_free (entry_address);
+
+        g_match_info_next (match_info, &inner_error);
+    }
+
+    if (match_info)
+        g_match_info_free (match_info);
+    g_regex_unref (r);
+
+    if (inner_error) {
+        g_propagate_error (error, inner_error);
+        g_prefix_error (error, "Couldn't properly parse list of routes. ");
+        return FALSE;
+    }
+
+ out:
+    if (!iface) {
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                     "Couldn't find iface for IP address '%s'", ipaddr);
+        return FALSE;
+    }
+
+    if (out_iface)
+        *out_iface = iface;
+    else
+        g_free (iface);
+    return TRUE;
+}
