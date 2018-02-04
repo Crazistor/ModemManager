@@ -82,6 +82,8 @@ dnl-----------------------------------------------------------------------------
 dnl i18n
 dnl
 
+IT_PROG_INTLTOOL([0.40.0])
+
 AM_GNU_GETTEXT([external])
 AM_GNU_GETTEXT_VERSION([0.19.8])
 
